@@ -1,4 +1,4 @@
-from flask import Flask,jsonify,render_template,request,Response,redirect,session
+from flask import Flask,jsonify,render_template,request,Response,redirect,session, url_for
 import requests
 import json
 import os
@@ -252,6 +252,13 @@ findScene(id: $scene_id){
     stash_ids{
       endpoint
       stash_id
+    }
+  }
+  scene_markers{
+    seconds
+    title
+    primary_tag{
+      name
     }
   }
 tags{
@@ -608,7 +615,7 @@ def filter():
 
 def rewrite_image_url(scene):
     screenshot_url=scene["paths"]["screenshot"]
-    scene["paths"]["screenshot"]='/image_proxy?scene_id='+screenshot_url.split('/')[4]+'&session_id='+screenshot_url.split('/')[5][11:]
+    scene["paths"]["screenshot"]= url_for('image_proxy', _external=True) + '?scene_id='+screenshot_url.split('/')[4]+'&session_id='+screenshot_url.split('/')[5][11:]
 
 
 def setup():
@@ -669,6 +676,7 @@ def show_post(scene_id):
     scene["thumbnailUrl"] = s["paths"]["screenshot"]
     scene["isFavorite"] = False
     scene["isWatchlist"] = False
+    scene["videoLength"] = round(s["file"]["duration"])
 
     vs = {}
     vs["resolution"] = s["file"]["height"]
@@ -680,12 +688,18 @@ def show_post(scene_id):
 
     if "is3d" in s:
         scene["is3d"] = s["is3d"]
-    if "screenType" in s:
+    if "screenType" in s:   
         scene["screenType"] = s["screenType"]
     if "stereoMode" in s:
         scene["stereoMode"] = s["stereoMode"]
 
-    scene["timeStamps"] = None
+    timeStamps = []
+    for m in s["scene_markers"]:
+        title = m.get("title", "")
+        primary_tag_name =  m.get("primary_tag", {}).get("name", "")
+        name = " - ".join([val for val in [primary_tag_name, title] if val])
+        timeStamps.append({"ts": m["seconds"], "name": name})
+    scene["timeStamps"] = timeStamps
 
     actors = []
     for p in s["performers"]:
