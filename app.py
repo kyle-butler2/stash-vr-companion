@@ -1,3 +1,4 @@
+import random
 from flask import Flask,jsonify,render_template,request,Response,redirect,session, url_for
 import requests
 import json
@@ -51,13 +52,10 @@ def __callGraphQL(query, variables=None):
             "GraphQL query failed:{} - {}. Query: {}. Variables: {}".format(response.status_code, response.content,
                                                                             query, variables))
 
-def get_scenes_with_tag( tag):
-    tagID = findTagIdWithName(tag)
-    return get_scenes({"tags": {"value": [tagID], "modifier": "INCLUDES_ALL"}})
-
-def get_scenes(scene_filter):
-    query = """query findScenes($scene_filter: SceneFilterType!) {
-findScenes(scene_filter: $scene_filter filter: {sort: "date",direction: DESC,per_page: -1} ) {
+def get_scenes():
+    query = """
+query findScenes($export_deovr_tag_id: ID!) {
+findScenes(scene_filter: {tags: {depth: 0, modifier: INCLUDES_ALL, value: [$export_deovr_tag_id]}}, filter: {sort: "file_mod_time",direction: DESC,per_page: -1} ) {
 count
 scenes {
   id
@@ -157,7 +155,8 @@ tags{
 }
 }"""
 
-    variables = {"scene_filter": scene_filter}
+
+    variables = {"export_deovr_tag_id": tags_cache["export_deovr"]["id"]}
     result = __callGraphQL(query, variables)
     res= result["findScenes"]["scenes"]
     for s in res:
@@ -357,7 +356,7 @@ def findStudioIdWithName(name):
     return None
 
 
-def reload_filter_studios():
+def build_studio_filters():
     query = """query {
       allStudios {
         id
@@ -382,7 +381,7 @@ def reload_filter_studios():
                 res.append(studio_fiter)
     return res
 
-def reload_filter_performer():
+def build_performer_filters():
     query = """{
   allPerformers{
   id
@@ -398,26 +397,22 @@ def reload_filter_performer():
         for tag in p['tags']:
             if tag["name"] == 'export_deovr':
                 if p['name'] not in performers:
-                    performer_filter = {}
-                    performer_filter['name'] = p['name']
-                    performer_filter['type'] = 'PERFORMER'
-                    performer_filter['performer_id']=p['id']
-#                    performer_filter['filter'] = {"tags": {"depth": 0, "modifier": "INCLUDES_ALL", "value": [tags_cache['export_deovr']['id']]},
-#                                     "performers": {"modifier": "INCLUDES_ALL", "value": [p["id"]]}}
-#                    tag_cleanup_performer
-                    performer_filter['filter'] = {"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
-                    performer_filter['post'] = tag_cleanup_performer
+                    performer_filter = {
+                        'name': p['name'],
+                        'type': 'PERFORMER',
+                        'performer_id': p['id'],
+                        'post': tag_cleanup_performer
+                    }
                     res.append(performer_filter)
     return res
 
-def reload_filter_tag():
+def build_tag_filters():
     res=[]
     for f in tags_cache['export_deovr']['children']:
         tags_filter={}
         tags_filter['name']=f['name']
         tags_filter['type']='TAG'
         tags_filter['id']=f['id']
-        tags_filter['filter']= {"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
         tags_filter['post']=tag_cleanup
         res.append(tags_filter)
     return res
@@ -498,7 +493,7 @@ def scene_type(scene):
         scene["screenType"] = "mkx200"
 
 
-def reload_filter_cache():
+def reload_tags():
     query = """{
   allTags{
     id
@@ -567,50 +562,46 @@ id
     result = __callGraphQL(query, variables)
     return result["tagCreate"]["id"]
 
-
-def filter():
-    reload_filter_cache()
+def build_scene_filters():
+    reload_tags()
 
     recent_filter={}
     recent_filter['name']='Recent'
-    recent_filter['filter'] = {"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
     recent_filter['type']='BUILTIN'
 
     vr_filter ={}
     vr_filter['name']='VR'
-    vr_filter['filter']={"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
     vr_filter['post']=tag_cleanup_3d
     vr_filter['type'] = 'BUILTIN'
 
+    vr_random_filter = {
+        'name': 'VR Random',
+        'post': lambda scenes, scene_category: sorted(tag_cleanup_3d(scenes[:], scene_category), key=lambda scene: random.randint(0, 999999)),
+        'type': 'BUILTIN'
+    }
+
     flat_filter={}
     flat_filter['name']='2D'
-#    flat_filter['filter'] = {"tags": {"value": [tags_cache['export_deovr']['id'],tags_cache['FLAT']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
-    flat_filter['filter']={"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
     flat_filter['post']=tag_cleanup_2d
     flat_filter['type'] = 'BUILTIN'
 
     star_filter={}
     star_filter['name']='5 Star'
-#    star_filter['filter'] = {"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"},"rating": {"modifier": "EQUALS","value": 5}}
-    star_filter['filter']={"tags": {"value": [tags_cache['export_deovr']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}}
     star_filter['post']=tag_cleanup_star
     star_filter['type'] = 'BUILTIN'
 
+    female_pov_filter = {
+        'name': 'FPOV',
+        'filter': {"tags": {"value": [tags_cache['FPOV']['id']], "depth": 0, "modifier": "INCLUDES_ALL"}},
+        'type': 'BUILTIN',
+        'post':tag_cleanup_3d
+    }
 
-    filter=[recent_filter,vr_filter,flat_filter,star_filter]
+    filter=[recent_filter,vr_filter,vr_random_filter,flat_filter,star_filter,female_pov_filter]
 
-    for f in reload_filter_studios():
-        filter.append(f)
-    for f in reload_filter_performer():
-        filter.append(f)
-    for f in reload_filter_tag():
-        filter.append(f)
-
-#    reload_filter_performer()
-#    filter.extend(studios)
-#    filter.extend(performers)
-#    reload_filter_tag()
-#    filter.extend(tags_filters.keys())
+    filter += build_studio_filters()
+    filter += build_performer_filters()
+    filter += build_tag_filters()
     return filter
 
 def rewrite_image_url(scene):
@@ -620,7 +611,7 @@ def rewrite_image_url(scene):
 
 def setup():
     tags = ["VR", "SBS", "TB", "export_deovr", "FLAT", "DOME", "SPHERE", "FISHEYE", "MKX200"]
-    reload_filter_cache()
+    reload_tags()
     for t in tags:
         if t not in tags_cache.keys():
             print("creating tag " +t)
@@ -633,33 +624,21 @@ def deovr():
     data = {}
     data["authorized"]="1"
     data["scenes"] = []
+    all_stash_scenes = get_scenes()
 
-    all_scenes=None
-    for f in filter():
-        res=[]
-#        scenes = get_scenes(f['filter'])
-        if all_scenes is None:
-            all_scenes = get_scenes(f['filter'])
-
-        scenes = all_scenes
-        if 'post' in f:
-            var=f['post']
-            scenes=var(scenes,f)
-
+    for scene_category in build_scene_filters():
+        scenes = all_stash_scenes[:]
+        post_process_function = scene_category.get('post')
+        scenes = post_process_function(scenes, scene_category) if post_process_function else scenes
+        res = []
         for s in scenes:
             r = {}
             r["title"] = s["title"]
             r["videoLength"] = int(s["file"]["duration"])
-#            if 'ApiKey' in headers:
-#                screenshot_url = s["paths"]["screenshot"]
-#                r["thumbnailUrl"] = request.base_url[:-6] + '/image_proxy?scene_id=' + screenshot_url.split('/')[
-#                    4] + '&session_id=' + screenshot_url.split('/')[5][11:]
-#            else:
-#                r["thumbnailUrl"] = s["paths"]["screenshot"]
             r["thumbnailUrl"] = s["paths"]["screenshot"]
             r["video_url"] = request.base_url + '/' + s["id"]
             res.append(r)
-        data["scenes"].append({"name": f['name'], "list": res})
+        data["scenes"].append({"name": scene_category['name'], "list": res})
     return jsonify(data)
 
 
@@ -733,17 +712,14 @@ def image_proxy():
 def index():
     return redirect("/filter/Recent", code=302)
 
-#    scenes = get_scenes_with_tag("export_deovr")
-#    return render_template('index.html',filters=filter(),filter='Recent',scenes=scenes)
-#    return show_category(filter='Recent')
 @app.route('/filter/<string:filter_id>')
 def show_category(filter_id):
     session['mode']='deovr'
     tags=[]
-    filters=filter()
+    filters=build_scene_filters()
+    scenes = get_scenes()
     for f in filters:
         if filter_id == f['name']:
-            scenes = get_scenes(f['filter'])
             if 'post' in f:
                 var=f['post']
                 scenes=var(scenes,f)
