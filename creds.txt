@@ -1,0 +1,3 @@
+API_URL=http://192.168.1.8:9666/graphql API_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOiJreWxlYnV0bGVyIiwiaWF0IjoxNjQzNTk5NzE3LCJzdWIiOiJBUElLZXkifQ.c-x9ARk8AYVnBbimcrb6AJ7QkBOD0r2LeH-YH0SAOYY' ./bin/python app.py
+
+API_URL=http://192.168.1.8:9666/graphql ./bin/python app.py

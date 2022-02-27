@@ -1,0 +1,15 @@
+FROM python
+label org.opencontainers.image.source = "https://github.com/Tweeticoats/stash-vr-companion"
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV API_URL http://192.168.1.8:9666/graphql
+ENV API_KEY eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOiJreWxlYnV0bGVyIiwiaWF0IjoxNjQzNTk5NzE3LCJzdWIiOiJBUElLZXkifQ.c-x9ARk8AYVnBbimcrb6AJ7QkBOD0r2LeH-YH0SAOYY
+
+
+COPY requirements.txt /
+RUN pip3 install -r /requirements.txt
+
+COPY . /app
+WORKDIR /app
+
+CMD [ "flask","run","--host=0.0.0.0"]

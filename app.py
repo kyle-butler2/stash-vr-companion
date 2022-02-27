@@ -29,6 +29,7 @@ studios=[]
 performers=[]
 tags_filters={}
 tags_cache={}
+viewed_scene_ids=[]
 
 
 def __callGraphQL(query, variables=None):
@@ -409,12 +410,16 @@ def build_performer_filters():
 def build_tag_filters():
     res=[]
     for f in tags_cache['export_deovr']['children']:
-        tags_filter={}
-        tags_filter['name']=f['name']
-        tags_filter['type']='TAG'
-        tags_filter['id']=f['id']
-        tags_filter['post']=tag_cleanup
-        res.append(tags_filter)
+        tags_filter_vr={}
+        tags_filter_vr['name']="VR " + f['name']
+        tags_filter_vr['type']='TAG'
+        tags_filter_vr['id']=f['id']
+        tags_filter_vr['post']=[random_sort, tag_cleanup, tag_cleanup_3d]
+        tags_filter_2d = tags_filter_vr.copy()
+        tags_filter_2d['name']= "2D " + f['name']
+        tags_filter_2d['post']=[random_sort, tag_cleanup, tag_cleanup_2d]
+        res.append(tags_filter_vr)
+        res.append(tags_filter_2d)
     return res
 
 def tag_cleanup(scenes,filter):
@@ -424,29 +429,33 @@ def tag_cleanup(scenes,filter):
             res.append(s)
     return res
 
-def tag_cleanup_3d(scenes,filter):
+def tag_cleanup_3d(scenes, _):
     res=[]
     for s in scenes:
         if s["is3d"]:
             res.append(s)
     return res
 
-def tag_cleanup_2d(scenes,filter):
+def tag_cleanup_2d(scenes, _):
     res=[]
     for s in scenes:
         if not s["is3d"]:
             res.append(s)
     return res
 
+def random_sort(scenes, _):
+    random.shuffle(scenes)
+    return scenes
 
-def tag_cleanup_star(scenes,filter):
+
+def tag_cleanup_star(scenes, _):
     res=[]
     for s in scenes:
         if s["rating"]==5:
             res.append(s)
     return res
 
-def tag_cleanup_studio(scenes,filter):
+def tag_cleanup_studio(scenes, _):
     res=[]
     for s in scenes:
         if s["studio"] is not None and 'id' in s['studio']:
@@ -454,14 +463,15 @@ def tag_cleanup_studio(scenes,filter):
                 res.append(s)
     return res
 
-def tag_cleanup_performer(scenes,filter):
+def tag_cleanup_performer(scenes, filter):
     res=[]
     for s in scenes:
         if filter['performer_id'] in [x['id'] for x in s['performers']]:
             res.append(s)
     return res
 
-
+def only_unspewed(scenes, _):
+    return filter(lambda scene: int(scene['o_counter']) == 0, scenes)
 
 def scene_type(scene):
     if "180_180x180_3dh_LR" in scene["path"]:
@@ -562,12 +572,29 @@ id
     result = __callGraphQL(query, variables)
     return result["tagCreate"]["id"]
 
+def recently_viewed_post(scenes, scene_category):
+    id_to_scene = {scene['id']: scene for scene in scenes}
+    recent_scenes = []
+    for scene_id in viewed_scene_ids:
+        recent_scene = id_to_scene.get(scene_id)
+        if recent_scene:
+            recent_scenes.append(recent_scene)
+    
+    return recent_scenes
+
+
 def build_scene_filters():
     reload_tags()
 
     recent_filter={}
     recent_filter['name']='Recent'
     recent_filter['type']='BUILTIN'
+
+    history_filter = {
+        'name': 'History',
+        'type': 'BUILTIN',
+        'post': recently_viewed_post
+    }
 
     vr_filter ={}
     vr_filter['name']='VR'
@@ -576,7 +603,13 @@ def build_scene_filters():
 
     vr_random_filter = {
         'name': 'VR Random',
-        'post': lambda scenes, scene_category: sorted(tag_cleanup_3d(scenes[:], scene_category), key=lambda scene: random.randint(0, 999999)),
+        'post': [random_sort, tag_cleanup_3d],
+        'type': 'BUILTIN'
+    }
+
+    vr_unspewed_filter = {
+        'name': 'VR Unspewed',
+        'post': [random_sort, tag_cleanup_3d, only_unspewed],
         'type': 'BUILTIN'
     }
 
@@ -584,6 +617,18 @@ def build_scene_filters():
     flat_filter['name']='2D'
     flat_filter['post']=tag_cleanup_2d
     flat_filter['type'] = 'BUILTIN'
+
+    flat_random_filter = {
+        'name': '2D Random',
+        'post': [random_sort, tag_cleanup_2d],
+        'type': 'BUILTIN'
+    }
+
+    flat_unspewed_filter = {
+        'name': '2D Unspewed',
+        'post': [random_sort, tag_cleanup_2d, only_unspewed],
+        'type': 'BUILTIN'
+    }
 
     star_filter={}
     star_filter['name']='5 Star'
@@ -597,7 +642,7 @@ def build_scene_filters():
         'post':tag_cleanup_3d
     }
 
-    filter=[recent_filter,vr_filter,vr_random_filter,flat_filter,star_filter,female_pov_filter]
+    filter=[recent_filter,history_filter,vr_filter,vr_unspewed_filter,vr_random_filter,flat_filter,flat_unspewed_filter,flat_random_filter,star_filter,female_pov_filter]
 
     filter += build_studio_filters()
     filter += build_performer_filters()
@@ -607,6 +652,9 @@ def build_scene_filters():
 def rewrite_image_url(scene):
     screenshot_url=scene["paths"]["screenshot"]
     scene["paths"]["screenshot"]= url_for('image_proxy', _external=True) + '?scene_id='+screenshot_url.split('/')[4]+'&session_id='+screenshot_url.split('/')[5][11:]
+
+def rewrite_stream_url(scene):
+    pass
 
 
 def setup():
@@ -627,9 +675,13 @@ def deovr():
     all_stash_scenes = get_scenes()
 
     for scene_category in build_scene_filters():
+        # make a copy because the filters are destructive but and I don't want to re-fetch from stash for each.
         scenes = all_stash_scenes[:]
-        post_process_function = scene_category.get('post')
-        scenes = post_process_function(scenes, scene_category) if post_process_function else scenes
+        post_process_functions = scene_category.get('post', [])
+        if callable(post_process_functions):
+            post_process_functions = [post_process_functions]
+        for post_process_function in post_process_functions:
+            scenes = post_process_function(scenes, scene_category)
         res = []
         for s in scenes:
             r = {}
@@ -694,9 +746,17 @@ def show_post(scene_id):
         scene["fleshlight"]=[{"title": Path(s['path']).stem +'.funscript',"url": s["paths"]["funscript"]}]
     else:
         scene["isScripted"] = False
+    
+    try:
+        viewed_scene_ids.remove(scene['id'])
+    except:
+        pass
+    
+    viewed_scene_ids.insert(0, scene['id'])
+    if len(viewed_scene_ids) > 100:
+        viewed_scene_ids.pop()
+
     return jsonify(scene)
-
-
 
 
 @app.route('/image_proxy')
@@ -720,9 +780,14 @@ def show_category(filter_id):
     scenes = get_scenes()
     for f in filters:
         if filter_id == f['name']:
+            scenes = get_scenes()
             if 'post' in f:
-                var=f['post']
-                scenes=var(scenes,f)
+                post_process_functions = f.get('post', [])
+                if callable(post_process_functions):
+                    post_process_functions = [post_process_functions]
+                
+                for post_process_function in post_process_functions:
+                    scenes = post_process_function(scenes, f)
             session['filter']=f['name']
             return render_template('index.html',filters=filters,filter=f,isGizmovr=False,scenes=scenes)
     return "Error, filter does not exist"
@@ -730,7 +795,7 @@ def show_category(filter_id):
 @app.route('/scene/<int:scene_id>')
 def scene(scene_id):
     s = lookupScene(scene_id)
-    return render_template('scene.html',scene=s,filters=filter())
+    return render_template('scene.html',scene=s,filters=build_scene_filters())
 
 @app.route('/performer/<int:performer_id>')
 def performer(performer_id):
@@ -751,8 +816,13 @@ def gizmovr_category(filter_id):
         if filter_id == f['name']:
             scenes = get_scenes(f['filter'])
             if 'post' in f:
-                var=f['post']
-                scenes=var(scenes,f)
+                post_process_functions = f.get('post', [])
+                if callable(post_process_functions):
+                    post_process_functions = [post_process_functions]
+                
+                for post_process_function in post_process_functions:
+                    scenes = post_process_function(scenes, f)
+                
             session['filter']=f['name']
             base_path=request.base_url[:-len(request.path)]
             return render_template('gizmovr.html',filters=filters,filter=f,scenes=scenes,isGizmovr=True,base_path=base_path)
@@ -792,6 +862,17 @@ def gizmovr_json(scene_id):
     data["format"]=angle
 
     return jsonify(data)
+
+@app.route('/increment_o_counter/<int:scene_id>')
+def increment_o_counter(scene_id):
+
+    query = """
+mutation incrementOCounter($scene_id: ID!) {
+  sceneIncrementO(id: $scene_id)
+}"""
+    __callGraphQL(query, {'scene_id': scene_id})
+
+    return redirect("/filter/Recent", code=302)
 
 @app.route('/stash-metadata')
 def stash_metadata():
