@@ -582,7 +582,6 @@ id
 def new_scenes(scenes, scene_category):
     actually_new = []
     for scene in scenes:
-        print("checking: " + scene['path'])
         if '_NEW/' in scene['path']:
             actually_new.append(scene)
     return actually_new
