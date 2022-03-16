@@ -1,7 +1,6 @@
 import random
 from flask import Flask,jsonify,render_template,request,Response,redirect,session, url_for
 import requests
-import json
 import os
 import datetime
 from pathlib import Path
@@ -56,7 +55,12 @@ def __callGraphQL(query, variables=None):
 def get_scenes():
     query = """
 query findScenes($export_deovr_tag_id: ID!) {
-findScenes(scene_filter: {tags: {depth: 0, modifier: INCLUDES_ALL, value: [$export_deovr_tag_id]}}, filter: {sort: "file_mod_time",direction: DESC,per_page: -1} ) {
+findScenes(
+    scene_filter: {
+        path: {modifier: INCLUDES, value: "_NEW/"}, 
+        OR: {tags: {depth: 0, modifier: INCLUDES, value: [$export_deovr_tag_id]}}
+    }, 
+    filter: {sort: "file_mod_time",direction: DESC,per_page: -1} ) {
 count
 scenes {
   id
@@ -164,10 +168,11 @@ tags{
         scene_type(s)
         if 'ApiKey' in headers:
             rewrite_image_url(s)
+            rewrite_stream_url(s)
     return res
 
 
-def lookupScene(id):
+def lookupScene(id, rewrite_video_url=True):
     query = """query findScene($scene_id: ID!){
 findScene(id: $scene_id){
   id
@@ -278,6 +283,8 @@ tags{
     scene_type(res)
     if 'ApiKey' in headers:
         rewrite_image_url(res)
+        if rewrite_video_url:
+            rewrite_stream_url(res)
     return res
 
 def findTagIdWithName(name):
@@ -572,6 +579,14 @@ id
     result = __callGraphQL(query, variables)
     return result["tagCreate"]["id"]
 
+def new_scenes(scenes, scene_category):
+    actually_new = []
+    for scene in scenes:
+        print("checking: " + scene['path'])
+        if '_NEW/' in scene['path']:
+            actually_new.append(scene)
+    return actually_new
+
 def recently_viewed_post(scenes, scene_category):
     id_to_scene = {scene['id']: scene for scene in scenes}
     recent_scenes = []
@@ -589,6 +604,12 @@ def build_scene_filters():
     recent_filter={}
     recent_filter['name']='Recent'
     recent_filter['type']='BUILTIN'
+
+    new_filter = {
+        'name': 'New',
+        'type': 'BUILTIN',
+        'post': new_scenes
+    }
 
     history_filter = {
         'name': 'History',
@@ -642,7 +663,7 @@ def build_scene_filters():
         'post':tag_cleanup_3d
     }
 
-    filter=[recent_filter,history_filter,vr_filter,vr_unspewed_filter,vr_random_filter,flat_filter,flat_unspewed_filter,flat_random_filter,star_filter,female_pov_filter]
+    filter=[new_filter,recent_filter,history_filter,vr_filter,vr_unspewed_filter,vr_random_filter,flat_filter,flat_unspewed_filter,flat_random_filter,star_filter,female_pov_filter]
 
     filter += build_studio_filters()
     filter += build_performer_filters()
@@ -654,7 +675,8 @@ def rewrite_image_url(scene):
     scene["paths"]["screenshot"]= url_for('image_proxy', _external=True) + '?scene_id='+screenshot_url.split('/')[4]+'&session_id='+screenshot_url.split('/')[5][11:]
 
 def rewrite_stream_url(scene):
-    pass
+    stream_url = scene["paths"]["stream"]
+    scene["paths"]["stream"] = url_for('stream_proxy', _external=True) + '?scene_id=' + scene['id']
 
 
 def setup():
@@ -666,6 +688,11 @@ def setup():
             createTagWithName(t)
 
 
+
+@app.route('/trigger_scan', methods=['GET'])
+def trigger_scan():
+    output = __callGraphQL("mutation { metadataScan(input:{}) }")
+    return jsonify(output)
 
 @app.route('/deovr',methods=['GET', 'POST'])
 def deovr():
@@ -724,7 +751,12 @@ def show_post(scene_id):
     if "stereoMode" in s:
         scene["stereoMode"] = s["stereoMode"]
 
-    timeStamps = []
+    if 'VR' in s['path']:
+        scene["is3d"] = True
+        scene["screenType"] = "dome"
+
+    # the player has a weird bug where it doens't clear the timestamps when going from a scene with them to one without. This makes sure every scene has at least one.
+    timeStamps = [{"ts": 0, "name": "Beginning"}]
     for m in s["scene_markers"]:
         title = m.get("title", "")
         primary_tag_name =  m.get("primary_tag", {}).get("name", "")
@@ -747,15 +779,6 @@ def show_post(scene_id):
     else:
         scene["isScripted"] = False
     
-    try:
-        viewed_scene_ids.remove(scene['id'])
-    except:
-        pass
-    
-    viewed_scene_ids.insert(0, scene['id'])
-    if len(viewed_scene_ids) > 100:
-        viewed_scene_ids.pop()
-
     return jsonify(scene)
 
 
@@ -766,6 +789,22 @@ def image_proxy():
     url=app.config['GRAPHQL_API'][:-8]+'/scene/'+scene_id+'/screenshot?'+session_id
     r = requests.get(url,headers=headers)
     return Response(r.content,content_type=r.headers['Content-Type'])
+
+@app.route('/stream_proxy')
+def stream_proxy():
+    scene_id = request.args.get('scene_id')
+    scene = lookupScene(scene_id, rewrite_video_url=False)
+
+    try:
+        viewed_scene_ids.remove(scene['id'])
+    except:
+        pass
+    
+    viewed_scene_ids.insert(0, scene['id'])
+    if len(viewed_scene_ids) > 100:
+        viewed_scene_ids.pop()
+        
+    return redirect(scene['paths']['stream'])
 
 
 @app.route('/')
