@@ -1,5 +1,6 @@
 import random
 from flask import Flask,jsonify,render_template,request,Response,redirect,session, url_for
+from itsdangerous import json
 import requests
 import os
 import datetime
@@ -51,6 +52,73 @@ def __callGraphQL(query, variables=None):
         raise Exception(
             "GraphQL query failed:{} - {}. Query: {}. Variables: {}".format(response.status_code, response.content,
                                                                             query, variables))
+
+def lookup_marker(marker_id, rewrite_video_url=True):
+    markers = get_markers(rewrite_video_url=rewrite_video_url)
+    marker = [marker for marker in markers if marker['id'] == marker_id]
+    if marker:
+        return marker[0]
+    else:
+        return None
+
+def get_markers(rewrite_video_url=True):
+    query = """
+query {
+    findSceneMarkers {
+    	count
+        scene_markers {
+            id
+            seconds
+            title
+            scene {
+                title
+                details
+                path
+                file {
+                    size
+                    duration
+                    video_codec
+                    audio_codec
+                    width
+                    height
+                    framerate
+                    bitrate
+                }
+                paths {
+                    stream
+                    screenshot
+                    preview
+                }
+                tags {
+                    id
+                    name
+                }
+            }
+            primary_tag {
+                id
+                name
+            }
+            stream
+        }
+    } 
+}
+"""
+
+    result = __callGraphQL(query)
+    res= result["findSceneMarkers"]["scene_markers"]
+    for s in res:
+        original_id = s['id']
+        s.update(**s['scene'])
+        s['paths']['stream'] = s['stream']
+        s['id'] = original_id
+
+        scene_type(s)
+        if 'ApiKey' in headers:
+            rewrite_image_url(s)
+            if rewrite_video_url:
+                rewrite_marker_stream_url(s)
+    return res
+
 
 def get_scenes():
     query = """
@@ -596,6 +664,21 @@ def recently_viewed_post(scenes, scene_category):
     
     return recent_scenes
 
+def build_marker_filters():
+    reload_tags()
+    marker_filters = []
+    for f in tags_cache['export_deovr']['children']:
+        tags_filter_vr={}
+        tags_filter_vr['name']= "VR" + f['name'] + " markers"
+        tags_filter_vr['type']='TAG'
+        tags_filter_vr['id']=f['id']
+        tags_filter_vr['post']=[random_sort, tag_cleanup, tag_cleanup_3d]
+        tags_filter_2d = tags_filter_vr.copy()
+        tags_filter_2d['name']= "2D " + f['name'] + " markers"
+        tags_filter_2d['post']=[random_sort, tag_cleanup, tag_cleanup_2d]
+        marker_filters.append(tags_filter_vr)
+        marker_filters.append(tags_filter_2d)
+    return marker_filters
 
 def build_scene_filters():
     reload_tags()
@@ -677,6 +760,11 @@ def rewrite_stream_url(scene):
     stream_url = scene["paths"]["stream"]
     scene["paths"]["stream"] = url_for('stream_proxy', _external=True) + '?scene_id=' + scene['id']
 
+def rewrite_marker_stream_url(marker):
+    stream_url = marker["paths"]["stream"]
+    marker["paths"]["stream"] = url_for('marker_stream_proxy', _external=True) + '?marker_id=' + marker['id']
+
+
 
 def setup():
     tags = ["VR", "SBS", "TB", "export_deovr", "FLAT", "DOME", "SPHERE", "FISHEYE", "MKX200"]
@@ -699,6 +787,26 @@ def deovr():
     data["authorized"]="1"
     data["scenes"] = []
     all_stash_scenes = get_scenes()
+    # all_markers = get_markers()
+    # 
+    # for marker_category in build_marker_filters():
+    #     markers = all_markers[:]
+    #     post_process_functions = marker_category.get('post', [])
+    #     if callable(post_process_functions):
+    #         post_process_functions = [post_process_functions]
+    #     for post_process_function in post_process_functions:
+    #         markers = post_process_function(markers, marker_category)
+    #     res = []
+    #     for marker in markers:
+    #         r = {}
+    #         r["title"] = marker["title"]
+    #         r["videoLength"] = int(marker["seconds"])
+    #         r["thumbnailUrl"] = marker["paths"]["screenshot"]
+    #         r["video_url"] = request.base_url + '/marker/' + marker["id"]
+    #         res.append(r)
+    #     if res:
+    #         data["scenes"].append({"name": marker_category['name'], "list": res})
+
 
     for scene_category in build_scene_filters():
         # make a copy because the filters are destructive but and I don't want to re-fetch from stash for each.
@@ -717,8 +825,51 @@ def deovr():
             r["video_url"] = request.base_url + '/' + s["id"]
             res.append(r)
         data["scenes"].append({"name": scene_category['name'], "list": res})
+    
     return jsonify(data)
 
+
+@app.route('/deovr/marker/<marker_id>')
+def show_marker(marker_id):
+    marker = lookup_marker(marker_id)
+
+    if not marker:
+        return jsonify({})
+
+    scene = {}
+    scene["id"] = marker["id"]
+    scene["title"] = marker["title"]
+    scene["authorized"] = 1
+    scene["description"] = marker["details"]
+    scene["thumbnailUrl"] = marker["paths"]["screenshot"]
+    scene["isFavorite"] = False
+    scene["isWatchlist"] = False
+    scene["videoLength"] = round(marker['seconds'])
+
+    vs = {}
+    vs["resolution"] = marker["file"]["height"]
+    vs["height"] = marker["file"]["height"]
+    vs["width"] = marker["file"]["width"]
+    vs["size"] = marker["file"]["size"]
+    vs["url"] = marker["paths"]["stream"]
+    scene["encodings"] = [{"name": marker["file"]["video_codec"], "videoSources": [vs]}]
+
+    if "is3d" in marker:
+        scene["is3d"] = marker["is3d"]
+    if "screenType" in marker:   
+        scene["screenType"] = marker["screenType"]
+    if "stereoMode" in marker:
+        scene["stereoMode"] = marker["stereoMode"]
+
+    if 'VR' in marker['path']:
+        scene["is3d"] = True
+        scene["screenType"] = "dome"
+
+    scene["fullVideoReady"] = True
+    scene["fullAccess"] = True
+    scene["isScripted"] = False
+    
+    return jsonify(scene)
 
 
 @app.route('/deovr/<int:scene_id>')
@@ -793,6 +944,23 @@ def image_proxy():
 def stream_proxy():
     scene_id = request.args.get('scene_id')
     scene = lookupScene(scene_id, rewrite_video_url=False)
+
+    try:
+        viewed_scene_ids.remove(scene['id'])
+    except:
+        pass
+    
+    viewed_scene_ids.insert(0, scene['id'])
+    if len(viewed_scene_ids) > 100:
+        viewed_scene_ids.pop()
+        
+    return redirect(scene['paths']['stream'])
+
+
+@app.route('/marker_stream_proxy')
+def marker_stream_proxy():
+    marker_id = request.args.get('marker_id')
+    scene = lookup_marker(marker_id, rewrite_video_url=False)
 
     try:
         viewed_scene_ids.remove(scene['id'])
@@ -910,7 +1078,35 @@ mutation incrementOCounter($scene_id: ID!) {
 }"""
     __callGraphQL(query, {'scene_id': scene_id})
 
-    return redirect("/filter/Recent", code=302)
+    return redirect("/filter/History", code=302)
+
+@app.route('/flag_problem/<int:scene_id>')
+def flag_problem(scene_id):
+    existing_tags_query = """
+    query existingTags($scene_id: ID!) {
+        findScene(id: $scene_id) {
+            tags { 
+                id
+            }
+        }
+    }"""
+    results = __callGraphQL(existing_tags_query, {'scene_id': scene_id})
+    print(results) 
+    existing_tag_ids = [tag['id'] for tag in results['findScene']['tags']]
+
+    
+    add_problem_tag_query = """
+    mutation flagProblem($scene_id: ID!, $tag_ids: [ID!]) {
+        sceneUpdate(input: {
+            id: $scene_id, tag_ids: $tag_ids
+        }) {
+            id
+        }
+    }"""
+
+    __callGraphQL(add_problem_tag_query, {'scene_id': scene_id, 'tag_ids': existing_tag_ids + [tags_cache['problem']['id']]})
+    return redirect("/filter/History", code=302)
+
 
 @app.route('/stash-metadata')
 def stash_metadata():
